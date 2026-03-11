@@ -22,28 +22,9 @@ print(f"TVM version: {tvm.__version__}")
 print("Environment setup complete!")
 print(f"NumPy: {np.__version__}")
 import tvm
+import torch
 
-# --- 诊断模块：强行寻找 ndarray ---
-possible_paths = [
-    "tvm.nd",
-    "tvm.runtime.ndarray",
-    "tvm._ffi.ndarray",
-    "tvm.ffi.ndarray"
-]
 
-nd = None
-for path in possible_paths:
-    try:
-        nd = __import__(path, fromlist=[''])
-        print(f"✅ Success! 成功找到 ndarray，路径位于: {path}")
-        break
-    except Exception as e:
-        print(f"❌ 导入 {path} 失败: {type(e).__name__} - {e}")
-
-if nd is None:
-    print("\n🚨 致命错误: 找不到 ndarray！这通常意味着你的 TVM 编译不完整，或者 libtvm.so 与 Python 环境存在严重的 C++ 依赖冲突。")
-    sys.exit(1)
-# ---------------------------------
 
 def apply_passes(mod: IRModule, passes: List, verbose: bool = False) -> IRModule:
     """应用一系列 Pass 到模块"""
@@ -184,6 +165,7 @@ model = MLP()
 origin_mod, params = model.export_tvm(
     {"forward": {"x": nn.spec.Tensor(("n", 784), "float32")}}
 )
+#print(params)
 
 print("Original MLP Model:")
 #origin_mod.show()
@@ -220,7 +202,7 @@ data_np = np.random.randn(32, 784).astype(np.float32)
 # 构建模块
 build_start = time.time()
     
-ex = relax.build(origin_mod, target="llvm")
+ex = tvm.compile(origin_mod, target="llvm")
 build_time = time.time() - build_start
     
     
@@ -228,15 +210,31 @@ build_time = time.time() - build_start
 vm = relax.VirtualMachine(ex, device)
     
 # 转换数据为 TVM NDArray
-data_nd = nd.array(data_np, device=device)
-params_nd = {k: nd.array(v, device=device) for k, v in params.items()}
+data_nd = tvm.runtime.tensor(data_np,device)
+param_dict = dict(params)
+params_nd = {}
+for k, v in param_dict.items():
+    # 获取原始 Tensor 的形状和数据类型
+    shape = v.shape
+    dtype = v.dtype
     
+    # 使用 numpy 生成正态分布的随机权重，并确保类型一致
+    random_weight = np.random.randn(*shape).astype(dtype)
+    
+    # 将生成的随机 numpy 数组转换为 TVM 的 NDArray，并放进设备中
+    params_nd[k] = tvm.runtime.tensor(random_weight, device=device)
+    
+    #print(type(k),type(v))
+print(params_nd)
+#params_nd = {k: tvm.runtime.tensor(v, device=device) for k, v in param_dict.items()}
+param_values = list(params_nd.values())
 # 预热
 for _ in range(10):
-    _ = vm["forward"](data_nd, **params_nd) 
+    _ = vm["forward"](data_nd, *param_values) 
 device.sync()
 start = time.time()
-result = vm["forward"](data_nd, **params_nd)
+result = vm["forward"](data_nd, *param_values)
 device.sync()
 end = time.time()
 #times.append(end - start)
+print(result)
