@@ -408,8 +408,220 @@ optimized_mod = AddMulToFma()(mod)
 
 ---
 
+## 6. Pipeline 优化原理
+
+TVM Relax 提供了三层预定义的优化 Pipeline，每种 Pipeline 适用于不同的优化场景。
+
+### 6.1 Pipeline 概览
+
+| Pipeline | 用途 | 优化级别 |
+|----------|------|----------|
+| **zero_pipeline** | 轻量级优化，应用预调优日志 | 基础 |
+| **default_build_pipeline** | 完整端到端编译流程 | 完整 |
+| **static_shape_tuning_pipeline** | 结合自动调优的编译流程 | 高级 |
+
+### 6.2 Zero Pipeline
+
+**定义**：轻量级优化管道，主要用于应用预调优的日志。
+
+```python
+def zero_pipeline(*, enable_warning: bool = False):
+    seq = tvm.transform.Sequential([
+        transform.LegalizeOps(enable_warning=enable_warning),
+        transform.AnnotateTIROpPattern(),
+        transform.FoldConstant(),
+        transform.FuseOps(),
+        transform.FuseTIR(),
+    ])
+```
+
+| Pass | 优化原理 |
+|------|----------|
+| **LegalizeOps** | 将高级 Relax 算子转换为底层 TIR 实现或外部库调用 |
+| **AnnotateTIROpPattern** | 标注 TIR 操作的计算模式（逐元素、归约等），为后续融合提供信息 |
+| **FoldConstant** | 常量折叠：编译时计算常量表达式，减少运行时开销 |
+| **FuseOps** | 算子融合：将多个连续的逐元素操作合并为一个内核，减少内存访问 |
+| **FuseTIR** | TIR 级别的融合，进一步合并低级操作 |
+
+**核心优化思想**：
+- **算子融合** → 减少内存访问，提高计算密度
+- **常量折叠** → 编译时计算，避免运行时开销
+
+### 6.3 Default Build Pipeline
+
+**定义**：完整的端到端编译流程，包含所有必需的优化 Pass。
+
+```python
+def default_build_pipeline():
+    seq = tvm.transform.Sequential([
+        backend.DispatchSampling(),
+        backend.DispatchSortScan(),
+        transform.LegalizeOps(),
+        transform.RewriteDataflowReshape(),
+        transform.ToNonDataflow(),
+        transform.RemovePurityChecking(),
+        transform.CallTIRRewrite(),
+        transform.StaticPlanBlockMemory(),
+        transform.RewriteCUDAGraph(),
+        transform.LowerAllocTensor(),
+        transform.KillAfterLastUse(),
+        transform.LowerRuntimeBuiltin(),
+        transform.ComputePrimValue(),
+        transform.VMShapeLower(),
+        transform.AttachGlobalSymbol(),
+    ])
+```
+
+| Pass | 优化原理 |
+|------|----------|
+| **DispatchSampling** | 采样分析，为算子调度收集信息 |
+| **DispatchSortScan** | 对调度进行排序优化 |
+| **LegalizeOps** | 算子合法化，转换为可执行形式 |
+| **RewriteDataflowReshape** | 消除冗余的 reshape 操作 |
+| **ToNonDataflow** | 将 dataflow 块转换为普通函数，准备 lowering |
+| **RemovePurityChecking** | 移除纯度检查，减少运行时开销 |
+| **CallTIRRewrite** | 重写 `call_tir` 调用为实际执行代码 |
+| **StaticPlanBlockMemory** | 静态规划内存分配，减少运行时分配开销 |
+| **RewriteCUDAGraph** | 优化 CUDA Graph 捕获 |
+| **LowerAllocTensor** | 降低张量分配为底层内存操作 |
+| **KillAfterLastUse** | 死代码消除：释放最后一次使用后的内存 |
+| **LowerRuntimeBuiltin** | 降低运行时内置函数 |
+| **ComputePrimValue** | 计算原始值（如形状表达式） |
+| **VMShapeLower** | 降低 VM 形状相关操作 |
+| **AttachGlobalSymbol** | 附加全局符号，用于链接 |
+
+### 6.4 Static Shape Tuning Pipeline
+
+**定义**：结合自动调优的编译管道，支持 MetaSchedule 自动搜索最优实现。
+
+```python
+def static_shape_tuning_pipeline(
+    total_trials: int,
+    target: Union[str, tvm.target.Target],
+    work_dir: str = "tuning_logs",
+    cpu_weight_prepack: bool = False,
+    max_trials_per_task: Optional[int] = None,
+):
+```
+
+**Pipeline 流程**：
+
+```
+DecomposeOpsForInference
+        ↓
+CanonicalizeBindings
+        ↓
+Zero Pipeline
+        ↓
+[可选] Layout Rewrite (cpu_weight_prepack)
+        ↓
+MetaScheduleTuneIRMod (自动调优)
+        ↓
+MetaScheduleApplyDatabase
+        ↓
+[可选] 后处理 Layout Rewrite
+```
+
+**参数说明**：
+
+| 参数 | 作用 |
+|------|------|
+| `total_trials` | 总调优试验次数 |
+| `target` | 目标设备（如 "llvm", "cuda"） |
+| `work_dir` | 调优日志存储目录 |
+| `cpu_weight_prepack` | 是否启用 CPU 权重预打包（优化内存布局） |
+| `max_trials_per_task` | 每个任务的最大试验次数 |
+
+### 6.5 目标特化优化
+
+Pipeline 根据目标架构选择特定优化策略：
+
+```python
+def library_dispatch_passes(target: tvm.target.Target):
+    if target.kind.name == "cuda":
+        return backend.cuda.library_dispatch_passes(target)
+    if target.kind.name == "llvm":
+        return backend.cpu_generic.library_dispatch_passes(target)
+    # ...
+```
+
+| 目标 | 优化重点 |
+|------|----------|
+| **CUDA/ROCm** | GPU 线程束调度、共享内存优化 |
+| **LLVM** | CPU 向量化（SIMD）、循环展开 |
+| **Metal** | Apple GPU 优化 |
+| **Adreno** | Qualcomm GPU 特定优化 |
+
+### 6.6 优化分层架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    高层优化                              │
+│  算子融合、常量折叠、布局优化、冗余消除                    │
+│  (Zero Pipeline)                                         │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                   中层 lowering                           │
+│  Dataflow → 普通函数、CallTIR 重写、形状 lowering         │
+│  (Default Build Pipeline - 前 8 个 Pass)                │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                   底层优化                                │
+│  内存规划、死代码消除、运行时 builtin lowering            │
+│  (Default Build Pipeline - 后 7 个 Pass)                │
+└─────────────────────────────────────────────────────────┘
+                          ↓
+┌─────────────────────────────────────────────────────────┐
+│                   目标特化                                │
+│  CUDA/LLVM/Metal 特定优化                                 │
+│  (library_dispatch_passes, legalize_passes, etc.)       │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 6.7 Pipeline 使用示例
+
+```python
+# 1. 使用 Zero Pipeline（应用预调优日志）
+from tvm.relax.pipeline import zero_pipeline
+
+mod = zero_pipeline()(mod)
+
+# 2. 使用 Default Build Pipeline（完整编译）
+from tvm.relax.pipeline import get_pipeline
+
+build_pipeline = get_pipeline("default_build")
+mod = build_pipeline()(mod)
+
+# 3. 使用 Static Shape Tuning Pipeline（自动调优）
+from tvm.relax.pipeline import static_shape_tuning_pipeline
+
+tuning_pipeline = static_shape_tuning_pipeline(
+    total_trials=1000,
+    target="llvm -num-cores 16",
+    work_dir="tuning_logs",
+    max_trials_per_task=64,
+)
+mod = tuning_pipeline()(mod)
+
+# 4. 编译最终模型
+ex = tvm.compile(mod, target=target)
+vm = relax.VirtualMachine(ex, device=tvm.cpu())
+```
+
+### 6.8 核心设计理念
+
+1. **分层优化**：从高级算子到底层代码逐步转换
+2. **模块化**：每个 Pass 独立，可组合复用
+3. **目标感知**：根据硬件特性选择最优策略
+4. **可扩展**：支持注册自定义 Pipeline
+
+---
+
 ## 参考资料
 
 - [TVM Relax 文档](https://tvm.apache.org/docs/reference/api/python/relax.html)
 - [TVM 变换 Pass 列表](https://tvm.apache.org/docs/reference/api/python/relax.transform.html)
 - [TensorIR 介绍](https://tvm.apache.org/docs/arch/tir.html)
+- [MLC 课程笔记 5：自动程序优化](../note-lec/5_Automatic_Program_Optimization.ipynb)

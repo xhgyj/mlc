@@ -6,12 +6,7 @@
 
 这是 **MLC（机器学习编译）课程** 的学习工作区，来自 mlc-ai。仓库包含教学用的 Jupyter 笔记本，涵盖 TVM（Tensor Virtual Machine）概念，包括 TensorIR、Relax 和端到端模型编译。
 
-## 环境配置
 
-所有笔记本都需要 `mlc-ai-nightly` 包（**不是**稳定的 `tvm` 包）：
-
-```bash
-pip install mlc-ai-nightly -f https://mlc.ai/wheels
 ```
 
 此 nightly 版本包含课程材料中使用的最新 TensorIR/Relax API 变更。使用稳定的 `tvm` 可能会导致与笔记本代码不兼容。

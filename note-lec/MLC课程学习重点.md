@@ -455,6 +455,13 @@ res_np = res.numpy()
 
 ## 🔗 相关资源
 
+### 官方资源
 - TVM 官方文档: https://tvm.apache.org/
 - MLC 课程: https://mlc.ai/
 - 安装命令: `pip install mlc-ai-nightly -f https://mlc.ai/wheels`
+
+### 本项目文档
+- [MetaSchedule 搜索原理分析](./metaschedule_search_principles.md) - 深入解释 TVM 自动调优如何搜索最优实现
+- [TVM 三层抽象详解](./tvm_three_layer_abstraction.md) - Relax、TE、TIR 三层的区别和优化作用
+- [Relax 变换指南](../relax_transformation_guide.md) - 内置变换和自定义 Pass 完整指南
+- [TensorIR 学习笔记](./3_TensorIR_Tensor_Program_Abstraction_Case_Study_Action_summary.md) - TensorIR 核心概念总结
